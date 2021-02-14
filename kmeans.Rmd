@@ -270,7 +270,7 @@ dim_reduce(compressed)
 
 
 
-# Appendix
+# References
 
 1. *J. Leskovec, A. Rajaraman, J.D. Ullman*. Mining of Massive Datasets.
 2. *D. Arthur and S. Vassilvitskiik-means++*. k-means++: The Advantages of Careful Seeding.
