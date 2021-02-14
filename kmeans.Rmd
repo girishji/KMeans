@@ -1,0 +1,276 @@
+---
+title: "Image compression using k-means clustering and dimensionality reduction"
+author: "Girish Palya"
+date: '`r Sys.Date()`'
+output:
+  html_document:
+    toc: yes
+    number_sections: yes
+    theme: cosmo
+    highlight: tango
+---
+
+# Overview
+
+Images can be compressed by removing some of the colors or by transforming RGB color-space into a monochromatic space. Former can be accomplished through clustering, where some colors are replaced by a common approximate color. Latter is achieved through dimensionality reduction. We will discuss the process in detail and implement necessary algorithms from scratch (in R). 
+
+# Clustering
+
+In Euclidean space, points are represented as vectors. The length of the vector is the same as the number of dimensions of the space, and components of the vector are the *coordinates* of the point. Clustering is a process of "grouping" points based on some distance measure. A common measure of distance is the Euclidean distance between two points (the square root of the sum of squares of difference of coordinates between points in each dimension).
+
+There are two approaches to clustering: *Hierarchical* approach, where each point is assigned to a distinct cluster in the beginning, and these clusters are merged until desired number of clusters are obtained. *Assignment* approach requires that number of clusters is known in advance. Points are assigned to clusters based on their distance to each other. k-means is the most popular assignment approach based algorithm.
+
+It is worth mentioning about the "curse of dimensionality" at this juncture. There is a problem unique to high dimensional space: In high dimensions, almost every point seems equally far away, and any two vectors seem almost orthogonal$^1$. This limits the use of simple algorithms like k-means to higher dimensions.
+
+## k-means algorithm
+
+k-means starts by randomly selecting k points from the set as the centers of k clusters. Centroid of a cluster is defined as the average of the points within the cluster. Centroid need not be one of the existing points in the set. The algorithm can be summarized as follows:
+
+1. Randomly choose an initial k points as k centroids.
+2. Assign each point to a cluster whose centroid is the nearest.
+3. Recalculate the centroid of all clusters.
+4. Repeat steps 2 and 3 until cluster membership no longer changes.
+
+In the following implementation, we make use of a matrix to store centroids, and a vector of length equal to number of points in X. Each component of this vector is an index into the rows of centroids matrix, representing the current cluster centroid to which the point belongs. Recalculation of cluster centroids is done after grouping points belonging to the same cluster -- a potentially costly operation.
+
+
+```{r}
+## Input: 
+#    X: A matrix where rows represent points, 
+#       and columns are dimensions
+#    k: Number of clusters desired
+#  Output:
+#    A matrix where each point (of X) is replaced by 
+#    the corresponding cluster centroid.
+k_means <- function(X, k) {
+  # A matrix where rows are centroids (k rows)
+  centroids <- k_means_plus_plus_init(X, k)
+  
+  # Nearest centroid to a point, expressed as an (row) index
+  #   into the centroids matrix (above)
+  nearest_centroid <- integer(nrow(X)) 
+  
+  max_iter <- 200
+  for (i in 1:max_iter) { # or until convergence
+    # Assign points to nearest centroids 
+    new_nearest_centroid <- sapply(1:nrow(X), function(x) {
+      distances <- sapply(1:nrow(centroids), function(cnt) {
+        sum((X[x, ] - centroids[cnt, ])**2)
+      })
+      which.min(distances) # index of max distance
+    })
+    
+    # Check for convergence    
+    if (all(new_nearest_centroid == nearest_centroid)) {
+      return(t(sapply(nearest_centroid, 
+                      function(x) centroids[x, ])))
+    } else {
+      nearest_centroid = new_nearest_centroid
+    }
+    
+    # Recalculate centroids
+    centroids <- t(sapply(1:nrow(centroids), function(cnt) {
+      grouped <- which(cnt == nearest_centroid)
+      colSums(X[grouped, , drop=F]) / nrow(X[grouped, , drop=F])
+    }))
+  }
+  if (i == max_iter) {
+    print(paste("error: failed to converge in",
+                max_iter, "iterations"))
+  }
+}
+```
+
+## Seeding the k-means algorithm (k-means++)
+
+The set of clusters returned by the k-means algorithm depends on the initial selection of points as seeds. Choosing different initial cluster centers could result in different clusters. k-means algorithm finds local optima. Finding global optima is NP-hard, owing to the combinatorial nature of choosing initial cluster seeds. To avoid poor clustering, many strategies have been proposed. One popular way is to choose initial cluster seeds that are farthest from each other. We will use a technique referred to as  k-means++$^2$, where initial cluster centers are chosen to maximize minimum distance between them. This method is proven to be $O(log k)$ competitive. 
+
+Let $D(x)$ denote the shortest distance from a data point to the closest centroid. Then, k-means++$^2$ algorithm is defined as follows:
+
+1. Choose the first centroid $c_1$ randomly.
+2. Choose a new centroid $c_i$ maximizing the probability $\frac{D(x^2)}{\sum_{\forall x}D(x^2)}$
+3. Repeat Step 2 until we have chosen k centers altogether.
+
+```{r}
+## Find k centroid seeds, chosen from matrix X.
+k_means_plus_plus_init <- function(X, k) {
+  if (k < 2) {
+    return(NULL)
+  }
+  ctrcount <- min(k, nrow(X))
+  
+  # Pick the first centroid
+  centroids <- matrix(X[sample(1:ctrcount, 1), ], nrow=1)
+  
+  # Subsequent centroids
+  for (i in 1:(ctrcount-1)) {
+    prob <- sapply(1:nrow(X), function(x) {
+      distances <- sapply(1:nrow(centroids), function(ct) {
+        sum((X[x, ] - centroids[ct, ])**2)
+      })
+      min(distances)
+    })
+    nextctr <- X[which.max(prob), ]
+    centroids <- rbind(centroids, nextctr, deparse.level=0)
+  }
+  centroids
+}
+```
+
+## Image compression
+
+We will apply k-means algorithm to lossy image compression, where number of colors is reduced in the final image. We group similar colors into clusters and replace them by the centroids of the cluster.
+
+Following image is of size 128x128 and represented in 24-bit color. This means that, for each of the 16384 pixels in the image, there are three 8-bit numbers (each ranging from 0 to 255) that represent the red, green, and blue intensity values for that pixel. The straightforward representation of this image therefore takes about 16384 × 3 = 49152 bytes. We will use k-means to reduce the image to k = 16 colors. More specifically, each pixel in the image is considered a point in the three-dimensional (r, g, b)-space. To compress the image, we will cluster these points in color-space into 16 clusters, and replace each pixel with the closest cluster centroid.
+
+Image before compression:
+
+```{r}
+img <- tiff::readTIFF("mandrill-small.tiff")
+grid::grid.raster(img, height=grid::unit(0.5, "npc"))
+```
+
+Compress the image:
+
+```{r}
+X <- matrix(c(img), ncol=3)
+compressed <- k_means(X, k=16) # 16 clusters
+print(paste(nrow(unique(X)), "colors compressed to",
+            nrow(unique(compressed)), "colors"))
+```
+
+Image after compression:
+
+```{r}
+img_compr <- array(c(compressed), dim = dim(img))
+grid::grid.raster(img_compr, height=grid::unit(0.5, "npc"))
+```
+
+Since compressed image has 16 colors, the color-space can be represented in only 4 bits.
+
+# Dimensionality reduction
+
+*Dimensionality reduction* is a process of reducing the dimensions of a matrix while still preserving a good amount of information. *Principal component analysis (PCA)* is a popular technique used in dimensionality reduction. The idea is as follows: We think of rows of a matrix as vectors representing points in Euclidean space. A `m`x`n` matrix will have `m` points in a `n`-dimensional space. We can "rotate" the axes of this space in a such a way that the first axis ("x" axis) is oriented along the direction that yields the maximum variance ("spread") of values of the coordinates of original points. Similarly, second axis (being orthogonal to the first) is chosen in a plane that yields highest variance, and so on. If this process is repeated, we will likely hit a plateau where subsequent axes capture only a small amount of variance ("information"). We can drop these less significant axes, thereby reducing the dimensions of our matrix (and size of our dataset). 
+
+To illustrate, we have a `n`x`2` matrix where each row is a point in 2-D space. The axis that captures the most variance is the blue line shown blow (which happens to be the linear regression line). We can simply rotate the x-axis to align with the blue line and recalculate the coordinates of the points. Even if we discard the y-axis altogether, we would still have captured a good chunk of information regarding how points are "spread out".
+
+```{r echo=FALSE, fig.height=4, fig.width=5}
+x <- rnorm(n=50, mean=10, sd=5)
+y <- rnorm(n=50, mean=1, sd=1)
+points <- matrix(c(x, y), ncol=2) %*% 
+  matrix(c(1, -1, 1, 1), ncol=2)
+par(mgp=c(1,0,0))
+plot(points, xlab='X', ylab='Y', xaxt='n', yaxt='n')
+abline(lm(X2~X1, data=data.frame(points)), col="blue")
+```
+
+
+# Using eigenvectors for dimensionality reduction
+
+Recall that multiplying a vector by a constant (scalar) changes its length, not its direction. Similarly, multiplying a vector by a vector (not all 1s) changes its direction. A matrix of orthogonal vectors (unit vectors that are orthogonal to one another) represent rotation of axes of the Euclidean space. In other words, if we multiply a matrix (where rows represent points) by a matrix of orthogonal vectors, we get new coordinates of original points along the rotated axes.
+
+Eigenvalues ($e$) and eigenvectors ($\lambda$) are a solution to the equation $Me = \lambda{e}$, where $M$ is a square matrix, $\lambda$ is a constant and $e$ is a nonzero column vector. Further, the determinant of $(M - \lambda{I}$ must be zero for the equation $(M - \lambda{I})e = 0$ to hold, where $I$ is an identity matrix of the same dimension as $M$. Equation $|M - \lambda{I}| = 0$ leads to a polynomial of the same order as as the dimension of M. Since a `n`-degree polynomial can lead to `n` solutions (of real numbers), there will be a maximum of `n` distinct eigenvectors. Also, eigenvectors of a symmetric matrix are orthogonal (dot product of any two eigenvectors will be 0).
+
+Eigenvectors are only defined for symmetric matrix. The matrix representing points in Euclidean space ($M$) need not be symmetric. However, the dot product of the matrix with its transpose ($M^TM$) leads to a symmetric matrix whose dimensions equal the dimensions of the space.
+We can find eigenvectors of this symmetric matrix and construct a matrix $E$ where first column is the principal eigenvector (corresponding to the highest eigenvalue), and second column is the eigenvector corresponding to second highest eigenvalue, and so on. This matrix can be thought of as rotation of axes in Euclidean space. Product $ME$ is the transformation of original data, where coordinates of points refer to the rotated axes.
+
+It can be shown that the coordinates of points along the first axis (principal eigenvector) will have maximum variance (spread). Points can be thought of as lying along this axis with less variance along subsequent axes. Second axis will have more variance than third axis and so on. We can choose first `k` axes (columns in $E$) to summarize the data. This is the essence of dimensional reduction. Principal components are nothing but components of the vectors (coordinates of original points) transformed by a matrix of eigenvectors.
+
+## Find eigenvectors and eigenvalues
+
+We use Power Iteration$^1$ to calculate eigenpairs in $O(n^3)$ time. We first start by calculating the principal eigenvector (corresponding to highest eigenvalue). We then remove this eigenvalue from the matrix. The modified matrix will yield the next eigenvector corresponding to the second highest eigenvalue. This process is repeated until the desired eigenpairs (or all `n` eigenpairs) are found. The reader is encouraged to work out this process by hand by following examples in [this book](http://www.mmds.org/).
+
+We start with a nonzero vector $x_0$, and iterate
+\begin{align*}
+x_{k+1} := \frac{Mx_k}{\lVert Mx_k \rVert}
+\end{align*}
+where $\lVert N \rVert$ for a vector $N$ represents square root of sum of squares of the terms of $N$ (*Frobenius norm*). We can start with a unit vector for $x_0$ and substitute $x_{k+1}$ for $x_k$ in the above equation until convergence is found (until $\lVert x_k - x_{k+1} \rVert$ is less than some small chosen value). In practice, the above equation converges within a few iterations. $x$ is (approximately) the principal eigenvector of $M$. Eigenvalue is calculated from the equation $\lambda_1 = x^{T}Mx$. If eigenvalue is zero, we discard the corresponding eigenvector since it constitutes the null space of $M$. To find subsequent eigenvector, we calculate a new matrix $M^{*} = M - \lambda_{1}xx^T$, and find its eigenpair. 
+
+
+```{r}
+# Find principal eigenvector of a symmetric matrix M. 
+principal_eigenvector <- function(M) {
+  x <- matrix(rep(1, ncol(M)))
+  for (i in 1:100) {
+    Mx <- M %*% x
+    x1 <- Mx / sqrt(sum(Mx^2))
+    if (sqrt(sum((x - x1)^2)) < 1e-5) {
+      return(x1) # convergence achieved
+    } else {
+      x <- x1
+    }
+  }
+  return(x1)
+}
+
+# Return eigenvalue corresponding to an eigenvector
+eigenvalue <- function(M, egnvector) {
+  return((t(egnvector) %*% M %*% egnvector)[1])
+}
+
+# Modify matrix M to 'remove' the principal eigenvector
+transform <- function(M, egnvalue, egnvector) {
+  return (M - (egnvalue * egnvector %*% t(egnvector)))
+}
+
+# Return a matrix whose first column is the principal
+#   eigenvector, second column is the eigenvector 
+#   corresponding to the second highest eigenvalue, and so on.
+eigenmatrix <- function(M) {
+  em <- matrix(nrow=ncol(M), ncol=ncol(M))
+  for (column in 1:ncol(M)) {
+    egnvec <- principal_eigenvector(M)
+    egnval <- eigenvalue(M, egnvec)
+    if (egnval < 1e-5) { # eigenvalue is 0
+      em <- em[, -ncol(em)] # discard eigenvector
+    } else {
+      em[, column] <- egnvec
+    }
+    M <- transform(M, egnval, egnvec)
+  }
+  return(em)
+}
+```
+
+## Image compression
+
+Our raster image is represented as a three dimensional array. The third dimension has three 128x128 matrices, each representing red, green, and blue intensity values. This raster image is rearranged into a `n`x`3` matrix where each pixel (red, green, and blue intensity values of a pixel) constitute a row. We can obtain 3 eigenvectors after calculating a `3`x`3` symmetric matrix from the dot product with its transpose. The variance of values of coordinates original points (colors) along the eigenvectors represent the "information" expressed by the principal components.
+
+Following plot shows the proportion of variance captured by eigenvectors. The principal eigenvector (first point in the plot) alone captures more than 50% of the variance (information) contained in the image. 
+
+```{r}
+M <- X
+E <- eigenmatrix(t(M) %*% M)
+ME <- M %*% E
+variances <- sapply(1:ncol(ME), function(x) var(ME[, x]))
+plot(1:ncol(M), variances/sum(variances), xaxt='n',
+     xlab='Principal component', 
+     ylab='Proportion of variance explained')
+axis(1, at=c(1, 2, 3))
+```
+
+
+If we reduce the dimension of the image matrix to a single vector (1-d matrix), the image size will decrease by 2/3. Following image is produced by projecting the colors onto the first principal component only (principle eigenvector), and plotting the resultant vector (monochrome) with grayscale.
+
+```{r}
+dim_reduce <- function(M) {
+  img_mono <- M %*% principal_eigenvector(t(M) %*% M)
+  img_raster <- matrix(img_mono/max(img_mono), ncol=128)
+  grid::grid.raster(img_raster, height=grid::unit(0.5, "npc"))
+}
+dim_reduce(X)
+```
+
+We can combine image compression (using clustering) and monochrome transformation (using dimensional reduction). Resultant image is slightly blurrier.
+
+```{r}
+dim_reduce(compressed)
+```
+
+
+
+
+# Appendix
+
+1. *J. Leskovec, A. Rajaraman, J.D. Ullman*. Mining of Massive Datasets.
+2. *D. Arthur and S. Vassilvitskiik-means++*. k-means++: The Advantages of Careful Seeding.
